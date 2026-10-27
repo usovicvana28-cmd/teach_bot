@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 
-# --- Заглушка для Render (улучшенная) ---
+# --- Заглушка для Render ---
 web_app = Flask(__name__)
 
 @web_app.route("/")
@@ -15,12 +15,10 @@ def health():
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    # use_reloader=False важно, чтобы Flask не пытался перезапускать процесс
     web_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# Запускаем Flask в отдельном потоке, который не зависит от бота
 threading.Thread(target=run_web, daemon=True).start()
-# ---------------------------------------
+# ---------------------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,7 +28,9 @@ client = AsyncOpenAI(
     api_key=os.environ["GROQ_API_KEY"]
 )
 
-user_histories = {}
+# База данных пользователей: 
+# user_data[uid] = {"mode": "learn/None", "history": [], "exam_subject": "", "current_q": 0, "score": 0}
+user_data = {}
 
 SYSTEM_PROMPT = """Ты — добрый и поддерживающий репетитор. Твоя цель — узнать уровень ученика.
 Правила общения:
@@ -50,40 +50,96 @@ async def get_ai_reply(history):
             temperature=0.6,
             extra_body={"reasoning_effort": "none"}
         )
-        content = response.choices[0].message.content
-        return content if content else "Ой, я задумался. Попробуй еще раз?"
+        return response.choices[0].message.content
     except Exception as e:
         logger.error(f"Ошибка Groq: {e}")
-        return f"Ошибка API: {e}"
+        return "Ошибка API. Попробуй еще раз."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    user_histories[uid] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    user_histories[uid].append({"role": "user", "content": "Привет! Я готов начать урок. Дай мне первое задание."})
+    # Сбрасываем режим экзамена, если он был
+    user_data[uid] = {"mode": "learn", "history": [{"role": "system", "content": SYSTEM_PROMPT}]}
+    user_data[uid]["history"].append({"role": "user", "content": "Привет! Я готов начать урок. Дай мне первое задание."})
     
     await update.message.reply_text("⏳ Секунду, готовлю для тебя задание...")
-    reply = await get_ai_reply(user_histories[uid])
-    user_histories[uid].append({"role": "assistant", "content": reply})
+    reply = await get_ai_reply(user_data[uid]["history"])
+    user_data[uid]["history"].append({"role": "assistant", "content": reply})
     await update.message.reply_text(reply)
+
+async def exam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user_data[uid] = {"mode": "exam_choose_subject"}
+    await update.message.reply_text("📚 По какому предмету хочешь сдать экзамен? Напиши название (например: Математика, История, Русский язык).")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in user_histories:
-        await update.message.reply_text("Привет! Напиши /start, чтобы начать.")
+    text = update.message.text
+
+    if uid not in user_data:
+        await update.message.reply_text("Привет! Напиши /start, чтобы начать обучение, или /exam, чтобы сдать экзамен.")
         return
 
-    history = user_histories[uid]
-    history.append({"role": "user", "content": update.message.text})
+    # Логика экзамена
+    if user_data[uid]["mode"] == "exam_choose_subject":
+        user_data[uid]["mode"] = "exam_running"
+        user_data[uid]["exam_subject"] = text
+        user_data[uid]["current_q"] = 1
+        user_data[uid]["score"] = 0
+        
+        prompt = [{"role": "system", "content": f"Ты — экзаменатор по предмету '{text}'. Задай ОДИН вопрос с 4 вариантами ответа (А, Б, В, Г). Без приветствий и лишнего текста. Только вопрос и варианты."}]
+        prompt.append({"role": "user", "content": "Дай первый вопрос."})
+        
+        await update.message.reply_text(f"📝 Вопрос 1 из 10:")
+        reply = await get_ai_reply(prompt)
+        await update.message.reply_text(reply)
+        return
 
-    if len(history) > 10: 
-        user_histories[uid] = [history[0]] + history[-9:]
-        history = user_histories[uid]
+    if user_data[uid]["mode"] == "exam_running":
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        
+        # Проверяем ответ пользователя через ИИ
+        subject = user_data[uid]["exam_subject"]
+        check_prompt = [
+            {"role": "system", "content": f"Ты — экзаменатор по '{subject}'. Тебе дали ответ ученика. Скажи только 'ДА' (без кавычек), если ответ правильный, или 'НЕТ' (без кавычек), если неправильный."},
+            {"role": "user", "content": f"Ученик ответил: {text}. Это правильно?"}
+        ]
+        
+        check_reply = await get_ai_reply(check_prompt)
+        
+        if "ДА" in check_reply.upper():
+            user_data[uid]["score"] += 1
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    reply = await get_ai_reply(history)
-    history.append({"role": "assistant", "content": reply})
-    
-    await update.message.reply_text(reply)
+        user_data[uid]["current_q"] += 1
+
+        if user_data[uid]["current_q"] <= 10:
+            # Задаем следующий вопрос
+            prompt = [{"role": "system", "content": f"Ты — экзаменатор по предмету '{subject}'. Задай ОДИН вопрос с 4 вариантами ответа (А, Б, В, Г). Без приветствий и лишнего текста. Только вопрос и варианты."}]
+            prompt.append({"role": "user", "content": f"Дай следующий вопрос, это вопрос номер {user_data[uid]['current_q']} из 10."})
+            
+            await update.message.reply_text(f"📝 Вопрос {user_data[uid]['current_q']} из 10:")
+            reply = await get_ai_reply(prompt)
+            await update.message.reply_text(reply)
+        else:
+            # Экзамен окончен
+            score = user_data[uid]["score"]
+            await update.message.reply_text(f"🏁 Экзамен по предмету '{subject}' завершен!\nТвой результат: {score} из 10.")
+            user_data[uid] = {"mode": "learn", "history": [{"role": "system", "content": SYSTEM_PROMPT}]}
+            await update.message.reply_text("Напиши /start, чтобы вернуться к обычным урокам, или /exam, чтобы сдать еще один экзамен.")
+        return
+
+    # Обычный режим обучения
+    if user_data[uid]["mode"] == "learn":
+        history = user_data[uid]["history"]
+        history.append({"role": "user", "content": text})
+
+        if len(history) > 10: 
+            user_data[uid]["history"] = [history[0]] + history[-9:]
+            history = user_data[uid]["history"]
+
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        reply = await get_ai_reply(history)
+        history.append({"role": "assistant", "content": reply})
+        await update.message.reply_text(reply)
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
@@ -92,7 +148,9 @@ def main():
         return
 
     app = Application.builder().token(token).build()
+    
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("exam", exam)) # Добавили команду /exam
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Бот запущен...")
