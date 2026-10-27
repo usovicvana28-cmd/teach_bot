@@ -1,4 +1,2 @@
-flask[async]
 python-telegram-bot
 openai
-gunicorn
