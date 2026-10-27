@@ -30,30 +30,25 @@ client = AsyncOpenAI(
 
 user_histories = {}
 
-# Короткий и четкий промпт
-SYSTEM_PROMPT = """Ты — репетитор по русскому языку. Твоя цель — подготовить ученика к ЦТ.
+# Мягкий и дружелюбный промпт
+SYSTEM_PROMPT = """Ты — добрый и поддерживающий репетитор по русскому языку. Твоя цель — мягко подготовить ученика к ЦТ.
 Правила общения:
-1. Не здоровайся каждый раз, не пиши длинные лекции. Просто дай задание.
-2. Формат задания: вопрос и 4 варианта ответа (А, Б, В, Г).
-3. Используй формат реальных тестов ЦТ (правописание, пунктуация, Н/НН).
-4. Когда ученик отвечает, проверь его. Если верно — коротко похвали и задай НОВЫЙ вопрос. Если неверно — объясни ошибку и задай ПОХОЖИЙ вопрос.
-5. НИКОГДА не придумывай сложные или двусмысленные вопросы. Если сомневаешься в правилах — задай простой вопрос на очевидное правило."""
+1. Будь вежливым и дружелюбным. Подбадривай ученика, если у него что-то не получается.
+2. Не пиши длинные лекции. Дай одно задание и жди ответа.
+3. Формат задания: вопрос и 4 варианта ответа (А, Б, В, Г). Используй темы ЦТ (правописание, пунктуация, Н/НН).
+4. Когда ученик отвечает:
+   - Если верно — искренне похвали и задай новый вопрос.
+   - Если неверно — мягко объясни ошибку (например: "Почти получилось! Давай вспомним правило..."), поддержи ученика и предложи похожее, чуть более простое задание.
+5. Не ругай ученика. Твоя задача — помочь ему поверить в свои силы."""
 
 async def get_ai_reply(history):
     try:
-        # Используем встроенный поиск Groq, чтобы ИИ брал реальные задания ЦТ
+        # Чистый запрос к Qwen без лишних инструментов
         response = await client.chat.completions.create(
             model="qwen/qwen3.8-27b", 
             messages=history,
-            max_tokens=400,
-            temperature=0.5, # Снизили температуру (меньше креатива, больше точности)
-            extra_body={
-                "tools": [
-                    {
-                        "type": "browser_search"
-                    }
-                ]
-            }
+            max_tokens=500,
+            temperature=0.6
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -63,10 +58,9 @@ async def get_ai_reply(history):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_histories[uid] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    # Начинаем без лишних слов, сразу просим задание
-    user_histories[uid].append({"role": "user", "content": "Дай мне первое задание в формате ЦТ."})
+    user_histories[uid].append({"role": "user", "content": "Привет! Я готов начать урок. Дай мне первое задание."})
     
-    await update.message.reply_text("⏳ Ищу задания в интернете...")
+    await update.message.reply_text("⏳ Секунду, готовлю для тебя задание...")
     reply = await get_ai_reply(user_histories[uid])
     user_histories[uid].append({"role": "assistant", "content": reply})
     await update.message.reply_text(reply)
@@ -80,20 +74,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = user_histories[uid]
     history.append({"role": "user", "content": update.message.text})
 
-    if len(history) > 10: # Память сокращена до 10 сообщений, чтобы модель не путалась
+    # Ограничиваем память 10 сообщениями (чтобы не перегружать модель)
+    if len(history) > 10: 
         user_histories[uid] = [history[0]] + history[-9:]
         history = user_histories[uid]
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     reply = await get_ai_reply(history)
     history.append({"role": "assistant", "content": reply})
+    
     await update.message.reply_text(reply)
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        logger.error("Токен TELEGRAM_TOKEN не найден!")
+        return
+
     app = Application.builder().token(token).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     logger.info("Бот ЦТ запущен...")
     app.run_polling(drop_pending_updates=True)
 
