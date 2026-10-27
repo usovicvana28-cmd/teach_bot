@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 
-# --- Заглушка для Render ---
+# --- Заглушка для Render (улучшенная) ---
 web_app = Flask(__name__)
 
 @web_app.route("/")
@@ -15,10 +15,12 @@ def health():
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+    # use_reloader=False важно, чтобы Flask не пытался перезапускать процесс
+    web_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
+# Запускаем Flask в отдельном потоке, который не зависит от бота
 threading.Thread(target=run_web, daemon=True).start()
-# ---------------------------
+# ---------------------------------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,7 +32,6 @@ client = AsyncOpenAI(
 
 user_histories = {}
 
-# ВАШ промпт, только с добавленными закрывающими кавычками
 SYSTEM_PROMPT = """Ты — добрый и поддерживающий репетитор. Твоя цель — узнать уровень ученика.
 Правила общения:
 1. Будь вежливым и строгим, если надо. Подбадривай ученика, если у него что-то не получается.
@@ -39,7 +40,6 @@ SYSTEM_PROMPT = """Ты — добрый и поддерживающий реп�
 4. Когда ученик отвечает:
    - Если верно — искренне похвали и задай новый вопрос.
    - Если неверно — поругай и объясни ошибку."""
-# (Конец промпта, кавычки закрыты)
 
 async def get_ai_reply(history):
     try:
@@ -47,12 +47,14 @@ async def get_ai_reply(history):
             model="qwen/qwen3.8-27b", 
             messages=history,
             max_tokens=500,
-            temperature=0.6
+            temperature=0.6,
+            extra_body={"reasoning_effort": "none"}
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        return content if content else "Ой, я задумался. Попробуй еще раз?"
     except Exception as e:
         logger.error(f"Ошибка Groq: {e}")
-        return "Ой, я задумался. Давай попробуем еще раз? Напиши любое сообщение."
+        return f"Ошибка API: {e}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -67,7 +69,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in user_histories:
-        await update.message.reply_text("Привет! Напиши /start, чтобы начать подготовку к ЦТ.")
+        await update.message.reply_text("Привет! Напиши /start, чтобы начать.")
         return
 
     history = user_histories[uid]
