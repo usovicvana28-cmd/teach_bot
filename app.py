@@ -23,7 +23,7 @@ SYSTEM_PROMPT = """Ты — учитель русского языка для 4 
 
 def get_ai_reply(history):
     resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-20b",
         messages=history,
         max_tokens=400,
         temperature=0.7,
