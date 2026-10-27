@@ -30,19 +30,19 @@ client = AsyncOpenAI(
 
 user_histories = {}
 
-# Мягкий и дружелюбный промпт
+# ВАШ промпт, только с добавленными закрывающими кавычками
 SYSTEM_PROMPT = """Ты — добрый и поддерживающий репетитор. Твоя цель — узнать уровень ученика.
 Правила общения:
 1. Будь вежливым и строгим, если надо. Подбадривай ученика, если у него что-то не получается.
 2. Не пиши длинные лекции. Дай одно задание и коментарий и жди ответа.
-3. Формат задания: вопрос и 4 варианта ответа . 
+3. Формат задания: вопрос и 4 варианта ответа. 
 4. Когда ученик отвечает:
    - Если верно — искренне похвали и задай новый вопрос.
-   - Если неверно — поругай и объясни ошибку
+   - Если неверно — поругай и объясни ошибку."""
+# (Конец промпта, кавычки закрыты)
 
 async def get_ai_reply(history):
     try:
-        # Чистый запрос к Qwen без лишних инструментов
         response = await client.chat.completions.create(
             model="qwen/qwen3.8-27b", 
             messages=history,
@@ -73,7 +73,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = user_histories[uid]
     history.append({"role": "user", "content": update.message.text})
 
-    # Ограничиваем память 10 сообщениями (чтобы не перегружать модель)
     if len(history) > 10: 
         user_histories[uid] = [history[0]] + history[-9:]
         history = user_histories[uid]
@@ -91,11 +90,10 @@ def main():
         return
 
     app = Application.builder().token(token).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Бот ЦТ запущен...")
+    logger.info("Бот запущен...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
