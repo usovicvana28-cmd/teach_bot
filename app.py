@@ -43,7 +43,7 @@ async def get_ai_reply(history):
     try:
         # Используем встроенный поиск Groq, чтобы ИИ брал реальные задания ЦТ
         response = await client.chat.completions.create(
-            model="openai/gpt-oss-20b", 
+            model="qwen/qwen3.8-27b", 
             messages=history,
             max_tokens=400,
             temperature=0.5, # Снизили температуру (меньше креатива, больше точности)
