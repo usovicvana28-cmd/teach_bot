@@ -1,106 +1,93 @@
 import os
 import logging
 import asyncio
-from flask import Flask, request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from openai import OpenAI
+from openai import AsyncOpenAI
 
-# --- Настройка логирования ---
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# --- Клиент Groq ---
-client = OpenAI(
+# Клиент Groq (совместим с OpenAI)
+client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=os.environ["GROQ_API_KEY"]
 )
 
-# --- Память и Промпт ---
+# Память для диалогов
 user_histories = {}
 
-SYSTEM_PROMPT = """Ты — бот-тренажёр по русскому языку для 4 класса.
-Твоя задача строго следовать алгоритму:
-1. Напиши ОДНО короткое задание (например: вставь пропущенную букву, раскрой скобки, найди ошибку). Никаких объяснений правил!
-2. Дождись ответа пользователя.
-3. Проверь ответ. Если верно — похвали ("Верно!", "Молодец!"). Если неверно — дай правильный ответ (без длинных объяснений).
-4. Сразу же напиши СЛЕДУЮЩЕЕ задание.
+SYSTEM_PROMPT = """Ты — добрый и терпеливый учитель русского языка для 4 класса. 
+Твоя задача — вести мини-урок. Не пиши слишком длинные тексты.
+Структура урока:
+1. Объясни одно простое правило (например, падеж или безударная гласная).
+2. Приведи 1-2 коротких примера.
+3. Задай одно задание (например, вставь пропущенную букву или выбери правильное слово).
+4. Дождись ответа ученика, проверь его и только потом переходи к следующему правилу.
+Говори простым языком. Если ученик ошибается, мягко объясни ошибку и дай похожее задание ещё раз."""
 
-ПРАВИЛА:
-- Не пиши длинные тексты. Максимум 2-3 предложения за раз.
-- Никаких лекций и правил. Только задание и проверка.
-- Задания должны быть простыми, для уровня 4 класса."""
+async def get_ai_reply(history):
+    try:
+        response = await client.chat.completions.create(
+            model="openai/gpt-oss-20b", # Актуальная бесплатная модель Groq
+            messages=history,
+            max_tokens=400,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Ошибка Groq: {e}")
+        return "Ой, я задумался и потерял мысль. Давай попробуем еще раз? Напиши 'Давай'."
 
-def get_ai_reply(history):
-    resp = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=history,
-        max_tokens=300,
-        temperature=0.7,
-    )
-    return resp.choices[0].message.content
-
-# --- Логика Telegram ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    user_histories[uid] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    user_histories[uid].append({"role": "user", "content": "Дай первое задание."})
+    logger.info(f"Пользователь {uid} начал урок.")
     
-    reply = await asyncio.to_thread(get_ai_reply, user_histories[uid])
+    user_histories[uid] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    user_histories[uid].append({"role": "user", "content": "Привет! Начнём урок."})
+    
+    await update.message.reply_text("⏳ Секунду, готовлю для тебя урок...")
+    reply = await get_ai_reply(user_histories[uid])
     user_histories[uid].append({"role": "assistant", "content": reply})
+    
     await update.message.reply_text(reply)
 
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in user_histories:
-        await update.message.reply_text("Напиши /start чтобы начать тренировку.")
+        await update.message.reply_text("Привет! Напиши /start, чтобы начать наш урок.")
         return
-    
+
     history = user_histories[uid]
     history.append({"role": "user", "content": update.message.text})
-    
-    if len(history) > 12:
-        user_histories[uid] = [history[0]] + history[-11:]
+
+    # Обрезаем память, чтобы не превысить лимиты
+    if len(history) > 16:
+        user_histories[uid] = [history[0]] + history[-15:]
         history = user_histories[uid]
-        
-    reply = await asyncio.to_thread(get_ai_reply, history)
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    reply = await get_ai_reply(history)
     history.append({"role": "assistant", "content": reply})
+    
     await update.message.reply_text(reply)
 
-# --- Инициализация Telegram ---
-telegram_app = Application.builder().token(os.environ["TELEGRAM_TOKEN"]).updater(None).build()
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+def main():
+    token = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        logger.error("Токен не найден!")
+        return
 
-# --- Flask App ---
-flask_app = Flask(__name__)
-
-@flask_app.route("/health")
-def health():
-    return "OK", 200
-
-@flask_app.route("/webhook", methods=["POST"])
-async def webhook():
-    if request.method == "POST":
-        update = Update.de_json(data=request.get_json(force=True), bot=telegram_app.bot)
-        await telegram_app.update_queue.put(update)
-        return Response(status=200)
-
-# --- Инициализация при старте (для Gunicorn) ---
-def init_bot():
-    render_url = os.environ.get("RENDER_EXTERNAL_URL", "https://teach-bot-gljw.onrender.com")
-    webhook_url = f"{render_url}/webhook"
+    app = Application.builder().token(token).build()
     
-    async def setup():
-        await telegram_app.bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook установлен: {webhook_url}")
-        await telegram_app.initialize()
-        await telegram_app.start()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Запускаем асинхронную настройку
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(setup())
+    logger.info("Бот запущен и слушает сообщения...")
+    app.run_polling(drop_pending_updates=True) # drop_pending_updates сбрасывает старые сообщения
 
-# Вызываем инициализацию при старте файла
-init_bot()
+if __name__ == "__main__":
+    main()
