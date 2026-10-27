@@ -1,17 +1,28 @@
 import os
 import logging
-import asyncio
+import threading
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# --- Заглушка для Render ---
+web_app = Flask(__name__)
+
+@web_app.route("/")
+def health():
+    return "OK", 200
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_web, daemon=True).start()
+# ---------------------------
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Клиент Groq (совместим с OpenAI)
 client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=os.environ["GROQ_API_KEY"]
@@ -19,7 +30,6 @@ client = AsyncOpenAI(
 
 user_histories = {}
 
-# Обновленный системный промпт с примерами ЦТ
 SYSTEM_PROMPT = """Ты — опытный репетитор по русскому языку, который готовит учеников к ЦТ (Централизованному тестированию). 
 Твоя задача — давать задания в формате ЦТ.
 
@@ -55,7 +65,6 @@ SYSTEM_PROMPT = """Ты — опытный репетитор по русско�
 2. Дай ОДНО задание в формате ЦТ (с вариантами А, Б, В, Г).
 3. Дождись ответа ученика (он напишет букву варианта, например "А").
 4. Проверь ответ. Если верно — похвали и дай следующее задание. Если неверно — объясни, в чем ошибка, и дай похожее задание.
-
 Важно: Пиши только на русском. Не перегружай ученика текстом. Будь дружелюбным, но требовательным, как настоящий репетитор."""
 
 async def get_ai_reply(history):
@@ -63,8 +72,8 @@ async def get_ai_reply(history):
         response = await client.chat.completions.create(
             model="openai/gpt-oss-20b", 
             messages=history,
-            max_tokens=500, # Чуть увеличили, так как задания с вариантами длиннее
-            temperature=0.6, # Снизили температуру, чтобы модель строже следовала формату
+            max_tokens=500,
+            temperature=0.6,
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -73,15 +82,11 @@ async def get_ai_reply(history):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    logger.info(f"Пользователь {uid} начал урок.")
-    
     user_histories[uid] = [{"role": "system", "content": SYSTEM_PROMPT}]
     user_histories[uid].append({"role": "user", "content": "Привет! Начнём урок в формате ЦТ."})
-    
-    await update.message.reply_text("⏳ Секунду, подбираю для тебя задания в формате ЦТ...")
+    await update.message.reply_text("⏳ Секунду, подбираю для тебя задания...")
     reply = await get_ai_reply(user_histories[uid])
     user_histories[uid].append({"role": "assistant", "content": reply})
-    
     await update.message.reply_text(reply)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,7 +98,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = user_histories[uid]
     history.append({"role": "user", "content": update.message.text})
 
-    # Обрезаем память, чтобы не превысить лимиты
     if len(history) > 16:
         user_histories[uid] = [history[0]] + history[-15:]
         history = user_histories[uid]
@@ -101,21 +105,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     reply = await get_ai_reply(history)
     history.append({"role": "assistant", "content": reply})
-    
     await update.message.reply_text(reply)
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        logger.error("Токен не найден!")
-        return
-
     app = Application.builder().token(token).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("Бот ЦТ запущен и слушает сообщения...")
+    logger.info("Бот запущен...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
