@@ -30,9 +30,9 @@ client_groq = AsyncOpenAI(
     api_key=os.environ["GROQ_API_KEY"]
 )
 
-# 2. Клиент Gemini (Резервный) - ОБНОВЛЕНО НА 2.5 FLASH LITE
+# 2. Клиент Gemini (Резервный) - ОБНОВЛЕНО НА 3.5 FLASH LITE
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model_gemini = genai.GenerativeModel('gemini-2.5-flash-lite')
+model_gemini = genai.GenerativeModel('gemini-3.5-flash-lite')
 
 user_data = {}
 
@@ -57,7 +57,7 @@ async def get_ai_reply(history):
         )
         return response.choices[0].message.content
     except Exception as e:
-        logger.warning(f"Groq упал или исчерпал лимит: {e}. Переключаюсь на Gemini 2.5 Flash Lite...")
+        logger.warning(f"Groq упал или исчерпал лимит: {e}. Переключаюсь на Gemini 3.5 Flash Lite...")
         
         try:
             # Переводим историю сообщений в простой текст для Gemini
